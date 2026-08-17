@@ -42,7 +42,7 @@ export class AutomaticTransactionExecutor implements TransactionExecutor {
 
     const { chainId, client } = this.clients(proposal.chainId);
     return this.nonces.serialize(chainId, proposal.destinationWallet, () => this.walletLock.withLock(chainId, proposal.destinationWallet, async () => {
-      let signed = false;
+      let phase: 'PRE_SIGN' | 'SIGNING' | 'SIGNED' | 'BROADCASTING' = 'PRE_SIGN';
       try {
         await this.attempts.transition(attempt.id, 'SIMULATING');
         const request = { from: proposal.destinationWallet, to: proposal.targetContract!, data: proposal.calldata! as `0x${string}`, value: BigInt(proposal.nativeValue!) };
@@ -66,24 +66,33 @@ export class AutomaticTransactionExecutor implements TransactionExecutor {
         const transaction: UnsignedTransaction = { chainId, to: proposal.targetContract! as `0x${string}`, data: proposal.calldata! as `0x${string}`,
           value: BigInt(proposal.nativeValue!), gas, nonce, ...fees };
         await this.attempts.transition(attempt.id, 'SIGNING', { unsignedTransaction: this.metadata(transaction), nonce: BigInt(nonce), gasEstimate: gas, nativeValue: transaction.value });
+        phase = 'SIGNING';
         const serialized = await this.signer.signTransaction(transaction);
-        signed = true;
         await this.attempts.transition(attempt.id, 'SIGNED');
+        phase = 'SIGNED';
+        const expectedHash = keccak256(serialized as `0x${string}`);
+        await this.attempts.transition(attempt.id, 'BROADCASTING', { copyTransactionHash: expectedHash });
+        phase = 'BROADCASTING';
         let transactionHash: string;
         try {
           transactionHash = await client.broadcast(serialized);
         } catch (error) {
           if (!this.isAlreadyKnown(error)) throw error;
-          transactionHash = keccak256(serialized as `0x${string}`);
+          transactionHash = expectedHash;
         }
+        if (transactionHash.toLowerCase() !== expectedHash.toLowerCase()) throw new Error('RPC returned a transaction hash that does not match the signed transaction');
         await this.attempts.transition(attempt.id, 'SUBMITTED', { copyTransactionHash: transactionHash });
         await this.proposals.changeExecutionStatus(proposal.id, proposal.executionStatus, 'SUBMITTED');
         return { transactionHash, submittedAt: new Date(), attemptId: attempt.id };
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Automatic execution failed';
         if (error instanceof ExecutionPolicyError) await this.attempts.transition(attempt.id, 'SKIPPED', { failureReason: message });
-        else if (!signed && settings.autoRetryEnabled && !message.includes('not signed') && !message.includes('Signer address')) {
+        else if (phase === 'PRE_SIGN' && settings.autoRetryEnabled && !message.includes('not signed') && !message.includes('Signer address')) {
           await this.attempts.transition(attempt.id, 'RETRY', { failureReason: message, retry: true });
+        } else if (phase === 'BROADCASTING' && this.isDefinitiveBroadcastRejection(error)) {
+          await this.attempts.transition(attempt.id, 'FAILED', { failureReason: message });
+        } else if (phase !== 'PRE_SIGN') {
+          await this.attempts.transition(attempt.id, 'UNKNOWN', { failureReason: `Recovery required after ${phase.toLowerCase()}: ${message}` });
         } else if (!message.includes('not signed') && !message.includes('already claimed') && !message.includes('Signer address')) {
           await this.attempts.transition(attempt.id, 'FAILED', { failureReason: message });
         }
@@ -104,6 +113,9 @@ export class AutomaticTransactionExecutor implements TransactionExecutor {
     return transaction.gasPrice !== undefined ? { ...metadata, gasPrice: transaction.gasPrice.toString() } : { ...metadata, maxFeePerGas: transaction.maxFeePerGas!.toString(), maxPriorityFeePerGas: transaction.maxPriorityFeePerGas!.toString() };
   }
   private isAlreadyKnown(error: unknown): boolean { return error instanceof Error && /already known|known transaction/i.test(error.message); }
+  private isDefinitiveBroadcastRejection(error: unknown): boolean {
+    return error instanceof Error && /insufficient funds|intrinsic gas|invalid sender|fee cap less than block base fee|transaction underpriced/i.test(error.message);
+  }
 }
 
 export class UnconfiguredTransactionExecutor implements TransactionExecutor {

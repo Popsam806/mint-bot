@@ -91,7 +91,7 @@ export interface UserExecutionSettings {
   autoRetryEnabled: boolean; createdAt: Date; updatedAt: Date;
 }
 
-export type ExecutionAttemptStatus = 'CLAIMED' | 'SIMULATING' | 'SIGNING' | 'SIGNED' | 'SUBMITTED' | 'PENDING' | 'CONFIRMED' | 'REVERTED' | 'FAILED' | 'SKIPPED' | 'RETRY';
+export type ExecutionAttemptStatus = 'PENDING' | 'CLAIMED' | 'SIMULATING' | 'SIGNING' | 'SIGNED' | 'BROADCASTING' | 'SUBMITTED' | 'CONFIRMED' | 'REVERTED' | 'FAILED' | 'SKIPPED' | 'RETRY' | 'UNKNOWN';
 export interface ExecutionAttempt {
   id: string; proposalId: string; sourceTransactionHash: string; destinationWallet: string;
   chainId: string; status: ExecutionAttemptStatus; copyTransactionHash: string | null;

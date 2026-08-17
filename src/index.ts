@@ -23,6 +23,7 @@ import { createRedisConnection } from './queue/redis.js';
 import { CompositePendingAnalysisHook } from './services/composite-pending-analysis-hook.js';
 import { PostgresDestinationWalletLock } from './services/destination-wallet-lock.js';
 import { ExecutionSettingsService } from './services/execution-settings-service.js';
+import { ExecutionRecoveryService } from './services/execution-recovery-service.js';
 import { MonitoringService } from './services/monitoring-service.js';
 import { NftMintDetector } from './services/nft-mint-detector.js';
 import { PendingAutomaticExecutionService } from './services/pending-automatic-execution-service.js';
@@ -44,6 +45,8 @@ const monitoredAddresses = new MonitoredAddressRepository(postgres);
 const chains = new ChainRepository(postgres);
 const detectedTransactions = new DetectedTransactionRepository(postgres);
 const executionAttempts = new ExecutionAttemptRepository(postgres);
+const recoveryService = new ExecutionRecoveryService(executionAttempts, (externalChainId) => new ViemExecutionClient(chainManager.getPublicClient(externalChainId)), logger,
+  undefined, new PostgresDestinationWalletLock(postgres));
 const mintDetector = new NftMintDetector(detectedTransactions, new DetectedMintRepository(postgres), logger);
 const monitoringEngine = new MonitoringEngine(chainManager, monitoredAddresses, detectedTransactions, new MonitoringCheckpointRepository(postgres), logger, mintDetector);
 
@@ -62,7 +65,7 @@ if (configuredSigner.enabled) {
     return { chainId: externalChainId, client: new ViemExecutionClient(chainManager.getPublicClient(externalChainId)) };
   }, undefined, undefined, new PostgresDestinationWalletLock(postgres));
   hooks.push(new PendingAutomaticExecutionService(settings, proposals, (chain) => new ViemExecutionClient(chainManager.getPublicClient(chain.id)), executor, logger,
-    (databaseChainId, externalChainId) => chainCache.set(databaseChainId, externalChainId)));
+    (databaseChainId, externalChainId) => chainCache.set(databaseChainId, externalChainId), () => recoveryService.isReady()));
   logger.info({ signerProvider: configuredSigner.provider }, 'Automatic execution signer configured');
 }
 
@@ -88,6 +91,7 @@ const runtime = new ApplicationRuntime({
   monitoring: monitoringEngine,
   pendingMonitoring: pendingMonitoringEngine,
   confirmation: confirmationEngine,
+  recovery: recoveryService,
   telegram,
   automaticExecutionEnabled,
   automaticExecutionProvider: configuredSigner.provider,

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { encodeFunctionData, parseAbi } from 'viem';
+import { encodeFunctionData, keccak256, parseAbi } from 'viem';
 import type { CopyTransactionProposal, UserExecutionSettings } from '../../src/database/types.js';
 import { ExecutionPolicy, type ExecutionPolicyContext } from '../../src/services/execution-policy.js';
 import { AutomaticTransactionExecutor } from '../../src/services/transaction-executor.js';
@@ -11,6 +11,8 @@ const destination = '0x0000000000000000000000000000000000000022';
 const target = '0x0000000000000000000000000000000000000033';
 const sourceHash = `0x${'a'.repeat(64)}`;
 const copyHash = `0x${'b'.repeat(64)}`;
+const signedPayload = `0x${'1'.repeat(200)}` as `0x${string}`;
+const derivedCopyHash = keccak256(signedPayload);
 const proposal = (overrides: Partial<CopyTransactionProposal> = {}): CopyTransactionProposal => ({
   id: '7', userId: '42', detectedMintId: '1', sourceTransactionHash: sourceHash, destinationWallet: destination,
   chainId: '1', strategy: 'PUBLIC_MINT', eligibilityStatus: 'ELIGIBLE', targetContract: target, calldata: '0x1234',
@@ -44,17 +46,17 @@ describe('ExecutionPolicy', () => {
   it('expires stale proposals', () => expect(policy.evaluate(policyContext({ proposal: proposal({ expiresAt: new Date(0) }) })).decision).toBe('EXPIRED'));
 });
 
-function setup(options: { simulation?: { success: true } | { success: false; error: string }; signerAddress?: string; broadcastError?: Error; claim?: boolean; retry?: boolean; gasError?: Error } = {}) {
+function setup(options: { simulation?: { success: true } | { success: false; error: string }; signerAddress?: string; signerError?: Error; broadcastError?: Error; claim?: boolean; retry?: boolean; gasError?: Error; transitionFailure?: string } = {}) {
   const value = proposal(); const configured = settings({ autoRetryEnabled: options.retry ?? false });
   const context = { monitoredSourceEnabled: true, chainEnabled: true, sourceStatus: 'PENDING', sourceCurrent: true,
     quantity: 1n, contractAddress: target, pendingDetectedAt: new Date(), analysisStartedAt: new Date(), analysisCompletedAt: new Date() };
   const transitions: string[] = [];
-  const attempts = { claim: vi.fn(async () => options.claim === false ? null : ({ id: '99' })), transition: vi.fn(async (_id: string, status: string) => { transitions.push(status); return { id: '99', status }; }), reconcile: vi.fn(async () => undefined) };
+  const attempts = { claim: vi.fn(async () => options.claim === false ? null : ({ id: '99' })), transition: vi.fn(async (_id: string, status: string) => { transitions.push(status); if (options.transitionFailure === status) throw new Error(`persist ${status} failed`); return { id: '99', status }; }), reconcile: vi.fn(async () => undefined) };
   const proposals = { findById: vi.fn(async () => value), changeExecutionStatus: vi.fn(async () => value) };
-  const signer = { getAddress: vi.fn(async () => options.signerAddress ?? destination), signTransaction: vi.fn(async () => `0x${'1'.repeat(200)}`) };
+  const signer = { getAddress: vi.fn(async () => options.signerAddress ?? destination), signTransaction: options.signerError ? vi.fn(async () => { throw options.signerError; }) : vi.fn(async () => signedPayload) };
   const client = { simulate: vi.fn(async () => options.simulation ?? { success: true as const }), estimateGas: options.gasError ? vi.fn(async () => { throw options.gasError; }) : vi.fn(async () => 110000n),
     getPendingNonce: vi.fn(async () => 5), estimateFees: vi.fn(async () => ({ maxFeePerGas: 3n, maxPriorityFeePerGas: 1n })),
-    broadcast: options.broadcastError ? vi.fn(async () => { throw options.broadcastError; }) : vi.fn(async () => copyHash) };
+    broadcast: options.broadcastError ? vi.fn(async () => { throw options.broadcastError; }) : vi.fn(async () => derivedCopyHash) };
   const executor = new AutomaticTransactionExecutor(proposals as never, { getOrCreate: vi.fn(async () => configured) } as never,
     { load: vi.fn(async () => context) } as never, attempts as never, signer, () => ({ chainId: 999, client }), new ExecutionPolicy(), new DestinationNonceManager());
   return { executor, value, attempts, transitions, signer, client, context, proposals };
@@ -63,14 +65,18 @@ function setup(options: { simulation?: { success: true } | { success: false; err
 describe('AutomaticTransactionExecutor', () => {
   it('re-simulates, signs, and broadcasts a valid transaction', async () => {
     const test = setup(); const result = await test.executor.execute(test.value);
-    expect(result.transactionHash).toBe(copyHash); expect(test.client.simulate).toHaveBeenCalled();
+    expect(result.transactionHash).toBe(derivedCopyHash); expect(test.client.simulate).toHaveBeenCalled();
     expect(test.signer.signTransaction).toHaveBeenCalledWith(expect.objectContaining({ nonce: 5, chainId: 999, gas: 110000n }));
-    expect(test.transitions).toEqual(['SIMULATING', 'SIGNING', 'SIGNED', 'SUBMITTED']);
+    expect(test.transitions).toEqual(['SIMULATING', 'SIGNING', 'SIGNED', 'BROADCASTING', 'SUBMITTED']);
     expect(JSON.stringify(test.attempts.transition.mock.calls, (_key, value: unknown) => typeof value === 'bigint' ? value.toString() : value)).not.toContain(`0x${'1'.repeat(200)}`);
   });
   it('does not sign after failed fresh simulation', async () => { const test = setup({ simulation: { success: false, error: 'wallet limit' } }); await expect(test.executor.execute(test.value)).rejects.toThrow('not signed'); expect(test.signer.signTransaction).not.toHaveBeenCalled(); });
   it('fails closed on signer address mismatch', async () => { const test = setup({ signerAddress: target }); await expect(test.executor.execute(test.value)).rejects.toThrow('does not match'); expect(test.signer.signTransaction).not.toHaveBeenCalled(); });
-  it('persists a broadcast failure without blind retry', async () => { const test = setup({ broadcastError: new Error('insufficient funds') }); await expect(test.executor.execute(test.value)).rejects.toThrow('insufficient funds'); expect(test.transitions.at(-1)).toBe('FAILED'); });
+  it('persists a definitive broadcast rejection without blind retry', async () => { const test = setup({ broadcastError: new Error('insufficient funds') }); await expect(test.executor.execute(test.value)).rejects.toThrow('insufficient funds'); expect(test.transitions.at(-1)).toBe('FAILED'); });
+  it('marks an ambiguous signing failure UNKNOWN', async () => { const test = setup({ signerError: new Error('signer connection reset') }); await expect(test.executor.execute(test.value)).rejects.toThrow('reset'); expect(test.transitions.at(-1)).toBe('UNKNOWN'); });
+  it('marks an ambiguous broadcast failure UNKNOWN', async () => { const test = setup({ broadcastError: new Error('RPC timeout') }); await expect(test.executor.execute(test.value)).rejects.toThrow('timeout'); expect(test.transitions.at(-1)).toBe('UNKNOWN'); });
+  it('fails closed when signed-state persistence fails', async () => { const test = setup({ transitionFailure: 'SIGNED' }); await expect(test.executor.execute(test.value)).rejects.toThrow('persist SIGNED'); expect(test.transitions.at(-1)).toBe('UNKNOWN'); expect(test.client.broadcast).not.toHaveBeenCalled(); });
+  it('leaves a known hash recoverable when submission persistence fails', async () => { const test = setup({ transitionFailure: 'SUBMITTED' }); await expect(test.executor.execute(test.value)).rejects.toThrow('persist SUBMITTED'); expect(test.transitions).toContain('BROADCASTING'); expect(test.transitions.at(-1)).toBe('UNKNOWN'); });
   it('prevents duplicate execution when the durable claim is held', async () => { const test = setup({ claim: false }); await expect(test.executor.execute(test.value)).rejects.toThrow('already claimed'); expect(test.signer.signTransaction).not.toHaveBeenCalled(); });
   it('places a pre-sign RPC failure into RETRY when configured', async () => { const test = setup({ gasError: new Error('temporary RPC failure'), retry: true }); await expect(test.executor.execute(test.value)).rejects.toThrow('temporary'); expect(test.transitions.at(-1)).toBe('RETRY'); expect(test.signer.signTransaction).not.toHaveBeenCalled(); });
   it('treats an already-known broadcast as submitted', async () => { const test = setup({ broadcastError: new Error('already known') }); await expect(test.executor.execute(test.value)).resolves.toMatchObject({ attemptId: '99' }); expect(test.transitions.at(-1)).toBe('SUBMITTED'); });

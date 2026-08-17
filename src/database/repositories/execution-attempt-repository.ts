@@ -1,6 +1,14 @@
 import type { Pool } from 'pg';
 import type { ExecutionAttempt, ExecutionAttemptStatus } from '../types.js';
 
+const allowedTransitions: Record<ExecutionAttemptStatus, readonly ExecutionAttemptStatus[]> = {
+  PENDING: ['CLAIMED', 'FAILED'], CLAIMED: ['SIMULATING', 'FAILED', 'RETRY', 'SKIPPED'],
+  SIMULATING: ['SIGNING', 'FAILED', 'RETRY', 'SKIPPED'], SIGNING: ['SIGNED', 'UNKNOWN'],
+  SIGNED: ['BROADCASTING', 'UNKNOWN'], BROADCASTING: ['SUBMITTED', 'FAILED', 'UNKNOWN'],
+  SUBMITTED: ['CONFIRMED', 'REVERTED', 'UNKNOWN'], CONFIRMED: [], REVERTED: [], FAILED: [], SKIPPED: [],
+  RETRY: ['CLAIMED', 'FAILED'], UNKNOWN: ['SUBMITTED', 'CONFIRMED', 'REVERTED'],
+};
+
 const nullable = (value: unknown): string | null => value === null || value === undefined ? null : String(value);
 const map = (row: Record<string, unknown>): ExecutionAttempt => ({
   id: String(row.id), proposalId: String(row.proposal_id), sourceTransactionHash: String(row.source_transaction_hash),
@@ -40,20 +48,29 @@ export class ExecutionAttemptRepository {
     if (status === 'SIMULATING') assignments.push('simulation_started_at=CURRENT_TIMESTAMP');
     if (['SIGNING','SKIPPED','FAILED','RETRY'].includes(status)) assignments.push('simulation_completed_at=CURRENT_TIMESTAMP');
     if (status === 'SIGNING') assignments.push('signing_started_at=CURRENT_TIMESTAMP');
-    if (status === 'SIGNED') assignments.push('signed_at=CURRENT_TIMESTAMP', 'broadcast_started_at=CURRENT_TIMESTAMP');
+    if (status === 'SIGNED') assignments.push('signed_at=CURRENT_TIMESTAMP');
+    if (status === 'BROADCASTING') assignments.push('broadcast_started_at=CURRENT_TIMESTAMP');
     if (status === 'SUBMITTED') assignments.push('broadcast_completed_at=CURRENT_TIMESTAMP');
     if (['FAILED','REVERTED'].includes(status)) assignments.push('failed_at=CURRENT_TIMESTAMP');
-    const result = await this.db.query(`UPDATE execution_attempts SET ${assignments.join(', ')} WHERE id=$1 RETURNING *`, values);
+    const fromStates = Object.entries(allowedTransitions).filter(([, targets]) => targets.includes(status)).map(([from]) => from);
+    values.push(fromStates);
+    const result = await this.db.query(`UPDATE execution_attempts SET ${assignments.join(', ')} WHERE id=$1 AND status = ANY($${values.length}::text[]) RETURNING *`, values);
+    if (!result.rows[0]) throw new Error(`Invalid or concurrent execution-attempt transition to ${status}`);
     return map(result.rows[0]);
   }
   async reconcile(hash: string, input: { confirmed: boolean; blockNumber: bigint; gasUsed: bigint; effectiveGasPrice: bigint }): Promise<void> {
     await this.db.query(`UPDATE execution_attempts SET status=$2, block_number=$3, gas_used=$4, effective_gas_price=$5,
       confirmed_at=CURRENT_TIMESTAMP, failed_at=CASE WHEN $2='REVERTED' THEN CURRENT_TIMESTAMP ELSE failed_at END, updated_at=CURRENT_TIMESTAMP
-      WHERE copy_transaction_hash=$1 AND status IN ('SUBMITTED','PENDING')`, [hash.toLowerCase(), input.confirmed ? 'CONFIRMED' : 'REVERTED', input.blockNumber.toString(), input.gasUsed.toString(), input.effectiveGasPrice.toString()]);
+      WHERE copy_transaction_hash=$1 AND status IN ('SUBMITTED','PENDING','BROADCASTING','UNKNOWN')`, [hash.toLowerCase(), input.confirmed ? 'CONFIRMED' : 'REVERTED', input.blockNumber.toString(), input.gasUsed.toString(), input.effectiveGasPrice.toString()]);
   }
   async listAwaitingConfirmation(): Promise<Array<{ transactionHash: string; externalChainId: number }>> {
     const result = await this.db.query(`SELECT ea.copy_transaction_hash, c.chain_id FROM execution_attempts ea
       JOIN chains c ON c.id=ea.chain_id WHERE ea.status IN ('SUBMITTED','PENDING') AND ea.copy_transaction_hash IS NOT NULL`);
     return result.rows.map((row) => ({ transactionHash: String(row.copy_transaction_hash), externalChainId: Number(row.chain_id) }));
+  }
+  async listRecoveryCandidates(): Promise<Array<ExecutionAttempt & { externalChainId: number }>> {
+    const result = await this.db.query(`SELECT ea.*, c.chain_id AS external_chain_id FROM execution_attempts ea
+      JOIN chains c ON c.id=ea.chain_id WHERE ea.status IN ('CLAIMED','SIMULATING','SIGNING','SIGNED','BROADCASTING','UNKNOWN','RETRY') ORDER BY ea.updated_at, ea.id`);
+    return result.rows.map((row) => ({ ...map(row), externalChainId: Number(row.external_chain_id) }));
   }
 }

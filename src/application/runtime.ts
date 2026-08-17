@@ -22,6 +22,7 @@ export interface ApplicationRuntimeOptions {
   monitoring: LifecycleComponent;
   pendingMonitoring: LifecycleComponent;
   confirmation: LifecycleComponent;
+  recovery?: LifecycleComponent;
   telegram?: TelegramComponent;
   automaticExecutionEnabled: boolean;
   automaticExecutionProvider?: string;
@@ -44,6 +45,14 @@ export class ApplicationRuntime {
       this.options.logger.warn({ error }, 'Redis unavailable; no Redis-backed worker is currently enabled');
     }
 
+    let recoveryReady = !this.options.recovery;
+    try {
+      await this.options.recovery?.start();
+      if (this.options.recovery) { recoveryReady = true; this.options.logger.info('Execution recovery ready'); }
+    } catch (error) {
+      this.options.logger.error({ error }, 'Execution recovery unavailable; automatic execution will remain unavailable');
+    }
+
     try {
       await this.options.monitoring.start();
       this.options.logger.info('Blockchain monitoring ready');
@@ -59,7 +68,8 @@ export class ApplicationRuntime {
     } catch (error) {
       this.options.logger.error({ error }, 'Pending monitoring unavailable');
     }
-    if (this.options.automaticExecutionEnabled && pendingReady) this.options.logger.info({ signerProvider: this.options.automaticExecutionProvider ?? 'configured' }, 'Automatic execution ready');
+    if (this.options.automaticExecutionEnabled && pendingReady && recoveryReady) this.options.logger.info({ signerProvider: this.options.automaticExecutionProvider ?? 'configured' }, 'Automatic execution ready');
+    else if (this.options.automaticExecutionEnabled && !recoveryReady) this.options.logger.warn('Automatic execution unavailable because durable recovery failed');
     else if (this.options.automaticExecutionEnabled) this.options.logger.warn('Automatic execution unavailable because pending monitoring failed');
     else this.options.logger.info('Automatic execution disabled; signer is unconfigured');
 
@@ -91,6 +101,7 @@ export class ApplicationRuntime {
     const results = await Promise.allSettled([
       Promise.resolve().then(() => this.options.telegram?.stop(reason)),
       Promise.resolve().then(() => this.options.confirmation.stop()),
+      Promise.resolve().then(() => this.options.recovery?.stop()),
       Promise.resolve().then(() => this.options.pendingMonitoring.stop()),
       Promise.resolve().then(() => this.options.monitoring.stop()),
       Promise.resolve().then(() => this.options.redis.quit()),

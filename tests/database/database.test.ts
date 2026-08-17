@@ -55,6 +55,19 @@ describe('database layer', () => {
     expect((await attempts.claim({ ...claim, allowRetry: true }))?.id).toBe(first!.id);
   });
 
+  it('fails closed on invalid execution-attempt state transitions', async () => {
+    const user = await new UserRepository(pool).create('709'); const chain = await new ChainRepository(pool).create('709', 'State Test');
+    const monitored = await new MonitoredAddressRepository(pool).create({ userId: user.id, chainId: chain.id, walletAddress: '0x0000000000000000000000000000000000000711' });
+    const transaction = await new DetectedTransactionRepository(pool).upsertPending({ monitoredAddressId: monitored.id, chainId: chain.id,
+      transaction: { hash: `0x${'6'.repeat(64)}`, from: monitored.walletAddress, to: '0x0000000000000000000000000000000000000712', nonce: 1n, value: 1n, input: '0x1234', gas: 1n, gasPrice: 1n, maxFeePerGas: null, maxPriorityFeePerGas: null },
+      observation: { hash: `0x${'6'.repeat(64)}`, observedAt: new Date(), provider: 'test' } });
+    const proposal = await new CopyTransactionProposalRepository(pool).createIfAbsent({ userId: user.id, detectedMintId: null, detectedTransactionId: transaction.id, mintQuantity: '1', sourceTransactionHash: transaction.transactionHash,
+      destinationWallet: '0x0000000000000000000000000000000000000713', chainId: chain.id, strategy: 'PUBLIC_MINT', eligibilityStatus: 'ELIGIBLE', targetContract: transaction.toAddress,
+      calldata: transaction.inputData, nativeValue: '1', gasLimit: '1', simulationStatus: 'SUCCESS', simulationError: null, proposalStatus: 'READY', confidence: 'HIGH', expiresAt: new Date(Date.now() + 10000), explanation: 'test' });
+    const attempts = new ExecutionAttemptRepository(pool); const claimed = await attempts.claim({ proposalId: proposal.id, sourceTransactionHash: transaction.transactionHash, destinationWallet: proposal.destinationWallet, chainId: chain.id });
+    await expect(attempts.transition(claimed!.id, 'SUBMITTED')).rejects.toThrow('Invalid or concurrent');
+  });
+
   it('prevents duplicate copy proposals for the same source and destination', async () => {
     const user = await new UserRepository(pool).create('801'); const chain = await new ChainRepository(pool).create('801', 'Proposal Test');
     const monitored = await new MonitoredAddressRepository(pool).create({ userId: user.id, chainId: chain.id, walletAddress: '0x0000000000000000000000000000000000000801' });

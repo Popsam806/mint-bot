@@ -7,19 +7,21 @@ const component = (onStart?: () => void) => ({
   stop: vi.fn(async () => undefined),
 });
 
-function setup(options: { telegram?: 'success' | 'failure'; onPendingStart?: () => void; redisFailure?: boolean } = {}) {
+function setup(options: { telegram?: 'success' | 'failure'; onPendingStart?: () => void; redisFailure?: boolean; recoveryFailure?: boolean } = {}) {
   const postgres = { query: vi.fn(async () => ({ rows: [{ '?column?': 1 }] })), end: vi.fn(async () => undefined) };
   const redis = { ping: options.redisFailure ? vi.fn(async () => { throw new Error('redis unavailable'); }) : vi.fn(async () => 'PONG'), quit: vi.fn(async () => 'OK') };
   const monitoring = component();
   const pendingMonitoring = component(options.onPendingStart);
   const confirmation = component();
+  const recovery = component();
+  if (options.recoveryFailure) recovery.start.mockRejectedValueOnce(new Error('recovery unavailable'));
   const telegram = options.telegram ? {
     launch: options.telegram === 'failure' ? vi.fn(async () => { throw new Error('telegram unavailable'); }) : vi.fn(async () => undefined),
     stop: vi.fn(async () => undefined),
   } : undefined;
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const runtime = new ApplicationRuntime({ postgres, redis, monitoring, pendingMonitoring, confirmation, telegram, automaticExecutionEnabled: true, logger });
-  return { runtime, postgres, redis, monitoring, pendingMonitoring, confirmation, telegram, logger };
+  const runtime = new ApplicationRuntime({ postgres, redis, monitoring, pendingMonitoring, confirmation, recovery, telegram, automaticExecutionEnabled: true, logger });
+  return { runtime, postgres, redis, monitoring, pendingMonitoring, confirmation, recovery, telegram, logger };
 }
 
 describe('ApplicationRuntime', () => {
@@ -56,6 +58,13 @@ describe('ApplicationRuntime', () => {
     expect(test.redis.ping).toHaveBeenCalledOnce();
     expect(test.postgres.query.mock.invocationCallOrder[0]).toBeLessThan(test.monitoring.start.mock.invocationCallOrder[0]!);
     expect(test.redis.ping.mock.invocationCallOrder[0]).toBeLessThan(test.monitoring.start.mock.invocationCallOrder[0]!);
+    expect(test.recovery.start.mock.invocationCallOrder[0]).toBeLessThan(test.pendingMonitoring.start.mock.invocationCallOrder[0]!);
+  });
+
+  it('keeps pending detection running but blocks AUTO readiness when startup recovery fails', async () => {
+    const test = setup({ recoveryFailure: true }); await test.runtime.start();
+    expect(test.pendingMonitoring.start).toHaveBeenCalledOnce();
+    expect(test.logger.warn).toHaveBeenCalledWith('Automatic execution unavailable because durable recovery failed');
   });
 
   it('continues the worker when unused Redis is unavailable', async () => {
@@ -75,6 +84,7 @@ describe('ApplicationRuntime', () => {
     const test = setup({ telegram: 'success' }); await test.runtime.start(); await test.runtime.shutdown('test');
     expect(test.telegram?.stop).toHaveBeenCalledWith('test');
     expect(test.confirmation.stop).toHaveBeenCalledOnce();
+    expect(test.recovery.stop).toHaveBeenCalledOnce();
     expect(test.pendingMonitoring.stop).toHaveBeenCalledOnce();
     expect(test.monitoring.stop).toHaveBeenCalledOnce();
     expect(test.redis.quit).toHaveBeenCalledOnce();
