@@ -14,6 +14,7 @@ export interface ExecutionResult { transactionHash: string; submittedAt: Date; a
 export interface TransactionExecutor { execute(proposal: CopyTransactionProposal): Promise<ExecutionResult>; }
 export interface ChainExecutionClient { chainId: number; client: ExecutionClient; }
 class ExecutionPolicyError extends Error {}
+class InsufficientBalanceError extends Error {}
 
 export class AutomaticTransactionExecutor implements TransactionExecutor {
   constructor(
@@ -62,7 +63,10 @@ export class AutomaticTransactionExecutor implements TransactionExecutor {
           throw new Error('Signer address does not match destination wallet');
         }
 
-        const [nonce, fees] = await Promise.all([client.getPendingNonce(proposal.destinationWallet), client.estimateFees()]);
+        const [nonce, fees, balance] = await Promise.all([client.getPendingNonce(proposal.destinationWallet), client.estimateFees(), client.getBalance(proposal.destinationWallet)]);
+        const feePerGas = 'gasPrice' in fees ? fees.gasPrice : fees.maxFeePerGas;
+        const requiredBalance = BigInt(proposal.nativeValue!) + gas * feePerGas;
+        if (balance < requiredBalance) throw new InsufficientBalanceError('Destination wallet balance is insufficient for value plus maximum gas cost');
         const transaction: UnsignedTransaction = { chainId, to: proposal.targetContract! as `0x${string}`, data: proposal.calldata! as `0x${string}`,
           value: BigInt(proposal.nativeValue!), gas, nonce, ...fees };
         await this.attempts.transition(attempt.id, 'SIGNING', { unsignedTransaction: this.metadata(transaction), nonce: BigInt(nonce), gasEstimate: gas, nativeValue: transaction.value });
@@ -87,6 +91,7 @@ export class AutomaticTransactionExecutor implements TransactionExecutor {
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Automatic execution failed';
         if (error instanceof ExecutionPolicyError) await this.attempts.transition(attempt.id, 'SKIPPED', { failureReason: message });
+        else if (error instanceof InsufficientBalanceError) await this.attempts.transition(attempt.id, 'FAILED', { failureReason: message });
         else if (phase === 'PRE_SIGN' && settings.autoRetryEnabled && !message.includes('not signed') && !message.includes('Signer address')) {
           await this.attempts.transition(attempt.id, 'RETRY', { failureReason: message, retry: true });
         } else if (phase === 'BROADCASTING' && this.isDefinitiveBroadcastRejection(error)) {

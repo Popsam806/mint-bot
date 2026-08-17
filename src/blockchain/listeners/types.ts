@@ -8,5 +8,6 @@ export interface MinedBlock { number: bigint; transactions: MinedTransaction[]; 
 export interface ChainBlockProvider {
   getBlockNumber(): Promise<bigint>;
   getBlock(blockNumber: bigint): Promise<MinedBlock>;
+  getTransactionReceiptStatus?(transactionHash: string): Promise<'success' | 'reverted'>;
   watchBlockNumbers(onBlock: (blockNumber: bigint) => void, onError: (error: unknown) => void): () => void;
 }

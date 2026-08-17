@@ -54,7 +54,7 @@ export class DetectedTransactionRepository {
     return saved;
   }
   async markMined(transactionHash: string, blockNumber: bigint, reverted = false): Promise<void> {
-    await this.db.query("UPDATE detected_transactions SET status = $2, block_number = $3, mined_block_number = $3, last_seen_at = CURRENT_TIMESTAMP WHERE transaction_hash = $1 AND status IN ('PENDING','detected')", [transactionHash.toLowerCase(), reverted ? 'REVERTED' : 'MINED', blockNumber.toString()]);
+    await this.db.query("UPDATE detected_transactions SET status = $2, block_number = $3, mined_block_number = $3, last_seen_at = CURRENT_TIMESTAMP WHERE transaction_hash = $1 AND status IN ('PENDING','detected','MINED')", [transactionHash.toLowerCase(), reverted ? 'REVERTED' : 'MINED', blockNumber.toString()]);
     if (reverted) await this.invalidateExecutionsByHash(transactionHash, 'Source transaction reverted');
   }
   async markDroppedBefore(cutoff: Date): Promise<number> {
@@ -65,6 +65,9 @@ export class DetectedTransactionRepository {
   }
   private async invalidateExecutionsByHash(hash: string, reason: string): Promise<void> {
     await this.db.query("UPDATE execution_attempts SET status='SKIPPED', failure_reason=$2, failed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE source_transaction_hash=$1 AND status IN ('CLAIMED','SIMULATING','RETRY')", [hash.toLowerCase(), reason]);
+    await this.db.query(`UPDATE copy_transaction_proposals SET execution_status='FAILED', updated_at=CURRENT_TIMESTAMP
+      WHERE id IN (SELECT proposal_id FROM execution_attempts WHERE source_transaction_hash=$1 AND status='SKIPPED')
+      AND execution_status NOT IN ('SUBMITTED','CONFIRMED')`, [hash.toLowerCase()]);
   }
   async markAnalysisTiming(id: string, startedAt: Date, completedAt: Date): Promise<void> {
     await this.db.query('UPDATE detected_transactions SET analysis_started_at = $2, analysis_completed_at = $3 WHERE id = $1', [id, startedAt, completedAt]);
@@ -72,6 +75,16 @@ export class DetectedTransactionRepository {
   async markInvalidated(transactionHash: string, reason = 'Source transaction invalidated'): Promise<void> {
     await this.db.query("UPDATE detected_transactions SET status='INVALIDATED', last_seen_at=CURRENT_TIMESTAMP WHERE transaction_hash=$1 AND status='PENDING'", [transactionHash.toLowerCase()]);
     await this.invalidateExecutionsByHash(transactionHash, reason);
+  }
+  async listMinedForReconciliation(limit = 500): Promise<Array<{ transactionHash: string; externalChainId: number }>> {
+    const result = await this.db.query(`SELECT dt.transaction_hash, c.chain_id FROM detected_transactions dt JOIN chains c ON c.id=dt.chain_id
+      WHERE dt.status='MINED' ORDER BY dt.last_seen_at DESC LIMIT $1`, [limit]);
+    return result.rows.map((row) => ({ transactionHash: String(row.transaction_hash), externalChainId: Number(row.chain_id) }));
+  }
+  async markReorged(transactionHash: string): Promise<void> {
+    const hash = transactionHash.toLowerCase();
+    await this.db.query("UPDATE detected_transactions SET status='reorged', last_seen_at=CURRENT_TIMESTAMP WHERE transaction_hash=$1 AND status='MINED'", [hash]);
+    await this.invalidateExecutionsByHash(hash, 'Source transaction was removed by a chain reorganization');
   }
   async setAnalysisStatus(id: string, status: DetectedTransaction['analysisStatus']): Promise<void> {
     await this.db.query('UPDATE detected_transactions SET analysis_status = $2, analyzed_at = CASE WHEN $2 IN (\'analyzed\', \'failed\') THEN CURRENT_TIMESTAMP ELSE analyzed_at END WHERE id = $1', [id, status]);

@@ -46,7 +46,7 @@ describe('ExecutionPolicy', () => {
   it('expires stale proposals', () => expect(policy.evaluate(policyContext({ proposal: proposal({ expiresAt: new Date(0) }) })).decision).toBe('EXPIRED'));
 });
 
-function setup(options: { simulation?: { success: true } | { success: false; error: string }; signerAddress?: string; signerError?: Error; broadcastError?: Error; claim?: boolean; retry?: boolean; gasError?: Error; transitionFailure?: string } = {}) {
+function setup(options: { simulation?: { success: true } | { success: false; error: string }; signerAddress?: string; signerError?: Error; broadcastError?: Error; claim?: boolean; retry?: boolean; gasError?: Error; transitionFailure?: string; balance?: bigint } = {}) {
   const value = proposal(); const configured = settings({ autoRetryEnabled: options.retry ?? false });
   const context = { monitoredSourceEnabled: true, chainEnabled: true, sourceStatus: 'PENDING', sourceCurrent: true,
     quantity: 1n, contractAddress: target, pendingDetectedAt: new Date(), analysisStartedAt: new Date(), analysisCompletedAt: new Date() };
@@ -56,6 +56,7 @@ function setup(options: { simulation?: { success: true } | { success: false; err
   const signer = { getAddress: vi.fn(async () => options.signerAddress ?? destination), signTransaction: options.signerError ? vi.fn(async () => { throw options.signerError; }) : vi.fn(async () => signedPayload) };
   const client = { simulate: vi.fn(async () => options.simulation ?? { success: true as const }), estimateGas: options.gasError ? vi.fn(async () => { throw options.gasError; }) : vi.fn(async () => 110000n),
     getPendingNonce: vi.fn(async () => 5), estimateFees: vi.fn(async () => ({ maxFeePerGas: 3n, maxPriorityFeePerGas: 1n })),
+    getBalance: vi.fn(async () => options.balance ?? 1_000_000n),
     broadcast: options.broadcastError ? vi.fn(async () => { throw options.broadcastError; }) : vi.fn(async () => derivedCopyHash) };
   const executor = new AutomaticTransactionExecutor(proposals as never, { getOrCreate: vi.fn(async () => configured) } as never,
     { load: vi.fn(async () => context) } as never, attempts as never, signer, () => ({ chainId: 999, client }), new ExecutionPolicy(), new DestinationNonceManager());
@@ -79,6 +80,7 @@ describe('AutomaticTransactionExecutor', () => {
   it('leaves a known hash recoverable when submission persistence fails', async () => { const test = setup({ transitionFailure: 'SUBMITTED' }); await expect(test.executor.execute(test.value)).rejects.toThrow('persist SUBMITTED'); expect(test.transitions).toContain('BROADCASTING'); expect(test.transitions.at(-1)).toBe('UNKNOWN'); });
   it('prevents duplicate execution when the durable claim is held', async () => { const test = setup({ claim: false }); await expect(test.executor.execute(test.value)).rejects.toThrow('already claimed'); expect(test.signer.signTransaction).not.toHaveBeenCalled(); });
   it('places a pre-sign RPC failure into RETRY when configured', async () => { const test = setup({ gasError: new Error('temporary RPC failure'), retry: true }); await expect(test.executor.execute(test.value)).rejects.toThrow('temporary'); expect(test.transitions.at(-1)).toBe('RETRY'); expect(test.signer.signTransaction).not.toHaveBeenCalled(); });
+  it('fails before signing when the destination balance cannot cover value and gas', async () => { const test = setup({ balance: 1n, retry: true }); await expect(test.executor.execute(test.value)).rejects.toThrow('balance'); expect(test.transitions.at(-1)).toBe('FAILED'); expect(test.signer.signTransaction).not.toHaveBeenCalled(); });
   it('treats an already-known broadcast as submitted', async () => { const test = setup({ broadcastError: new Error('already known') }); await expect(test.executor.execute(test.value)).resolves.toMatchObject({ attemptId: '99' }); expect(test.transitions.at(-1)).toBe('SUBMITTED'); });
   it('is restart-idempotent through the durable claim', async () => { const first = setup(); await first.executor.execute(first.value); const restarted = setup({ claim: false }); await expect(restarted.executor.execute(restarted.value)).rejects.toThrow('already claimed'); });
 });
@@ -109,18 +111,23 @@ describe('pending AUTO pipeline', () => {
   const transaction = { id: 'tx-1', chainId: '1', transactionHash: sourceHash, inputData: calldata, toAddress: target, transactionValue: '10' };
   const monitored = { id: 'm-1', userId: '42', chainId: '1', walletAddress: '0x0000000000000000000000000000000000000011', enabled: true, createdAt: new Date(), updatedAt: new Date() };
   const chain = { id: 999, name: 'Test EVM' };
-  function pendingSetup(mode: UserExecutionSettings['executionMode'] = 'AUTO') {
+  function pendingSetup(mode: UserExecutionSettings['executionMode'] = 'AUTO', queueReady = true) {
     const created = proposal({ detectedMintId: null, detectedTransactionId: 'tx-1', mintQuantity: '2' });
     const proposals = { createIfAbsent: vi.fn(async () => created) }; const executor = { execute: vi.fn(async () => ({ transactionHash: copyHash, submittedAt: new Date() })) };
     const client = { simulate: vi.fn(async () => ({ success: true as const })), estimateGas: vi.fn(async () => 100000n) };
+    const dispatcher = { isReady: vi.fn(() => queueReady), enqueueInitial: vi.fn(async () => undefined) };
     const service = new PendingAutomaticExecutionService({ getOrCreate: vi.fn(async () => settings({ executionMode: mode })) } as never,
-      proposals as never, () => client as never, executor, { info: vi.fn(), warn: vi.fn() } as never);
-    return { service, proposals, executor, client };
+      proposals as never, () => client as never, executor, { info: vi.fn(), warn: vi.fn() } as never, undefined, () => true, dispatcher);
+    return { service, proposals, executor, client, dispatcher };
   }
   it('builds and executes a supported pending public mint without Telegram', async () => {
     const test = pendingSetup(); await test.service.onPending(transaction, monitored, chain as never);
     expect(test.proposals.createIfAbsent).toHaveBeenCalledWith(expect.objectContaining({ mintQuantity: '2', detectedTransactionId: 'tx-1' }));
-    expect(test.executor.execute).toHaveBeenCalledTimes(1);
+    expect(test.dispatcher.enqueueInitial).toHaveBeenCalledWith('7'); expect(test.executor.execute).not.toHaveBeenCalled();
+  });
+  it('persists eligible work but never executes inline while Redis queues are unavailable', async () => {
+    const test = pendingSetup('AUTO', false); await test.service.onPending(transaction, monitored, chain as never);
+    expect(test.proposals.createIfAbsent).toHaveBeenCalledOnce(); expect(test.dispatcher.enqueueInitial).not.toHaveBeenCalled(); expect(test.executor.execute).not.toHaveBeenCalled();
   });
   it('does nothing when AUTO mode is disabled', async () => { const test = pendingSetup('DISABLED'); await test.service.onPending(transaction, monitored, chain as never); expect(test.executor.execute).not.toHaveBeenCalled(); });
   it('does not guess unsupported pending calldata', async () => { const test = pendingSetup(); await test.service.onPending({ ...transaction, inputData: '0xdeadbeef' }, monitored, chain as never); expect(test.client.simulate).not.toHaveBeenCalled(); expect(test.executor.execute).not.toHaveBeenCalled(); });

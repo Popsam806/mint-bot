@@ -11,7 +11,7 @@ function setup(blocks: MinedBlock[]) {
   let head = blocks.at(-1)?.number ?? 0n;
   const provider: ChainBlockProvider = { getBlockNumber: vi.fn(async () => head), getBlock: vi.fn(async (number) => blocks.find((item) => item.number === number) ?? { number, transactions: [] }), watchBlockNumbers: vi.fn(() => vi.fn()) };
   const saved: bigint[] = [];
-  const transactions = { createIfAbsent: vi.fn(async (input) => ({ ...input, transactionHash: input.transactionHash })) };
+  const transactions = { createIfAbsent: vi.fn(async (input) => ({ ...input, transactionHash: input.transactionHash })), markMined: vi.fn(async () => undefined) };
   const checkpoints = { get: vi.fn(async () => saved.at(-1) ?? 0n), save: vi.fn(async (_chain: string, number: bigint) => { saved.push(number); }) };
   const monitor = new ChainMonitor({ databaseChainId: '10', externalChainId: 10, chainName: 'Test', provider, hasWebSocket: false, getAddresses: () => [address('1', '0x0000000000000000000000000000000000000001'), address('2', '0x0000000000000000000000000000000000000003', false)], transactions: transactions as never, checkpoints: checkpoints as never, logger, confirmations: 0n, pollingIntervalMs: 10_000 });
   return { monitor, provider, transactions, checkpoints, saved, setHead: (next: bigint) => { head = next; } };
@@ -41,6 +41,13 @@ describe('generic EVM chain monitor', () => {
     const monitor = new ChainMonitor({ databaseChainId: '10', externalChainId: 10, chainName: 'Test', provider: test.provider, hasWebSocket: true, getAddresses: () => [], transactions: test.transactions as never, checkpoints: test.checkpoints as never, logger, confirmations: 0n, reconnectDelayMs: 1, pollingIntervalMs: 1 });
     await monitor.start(); onError?.(new Error('disconnect')); await new Promise((resolve) => setTimeout(resolve, 5)); await monitor.stop();
     expect(test.provider.watchBlockNumbers).toHaveBeenCalled();
+  });
+
+  it('does not classify a reverted monitored source transaction', async () => {
+    const test = setup([block(1n, '0x0000000000000000000000000000000000000001', '0x' + 'f'.repeat(64))]); test.provider.getTransactionReceiptStatus = vi.fn(async () => 'reverted');
+    await test.monitor.start(); await test.monitor.stop();
+    expect(test.transactions.markMined).toHaveBeenCalledWith(expect.any(String), expect.any(BigInt), true);
+    expect(test.transactions.createIfAbsent).not.toHaveBeenCalled();
   });
 
   it('supports independent monitors for multiple chains', async () => {

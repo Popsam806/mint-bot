@@ -39,6 +39,9 @@ describe('ExecutionRecoveryService', () => {
     const test = setup([attempt('BROADCASTING', { copyTransactionHash: hash })], { getTransaction: vi.fn(async () => ({ blockNumber: null })) });
     await test.service.recoverNow(); expect(test.transitions[0]?.[1]).toBe('SUBMITTED');
   });
+  it('keeps an invisible SUBMITTED transaction pending for confirmation backoff', async () => {
+    const test = setup([attempt('SUBMITTED', { copyTransactionHash: hash })]); await test.service.recoverNow(); expect(test.attempts.transition).not.toHaveBeenCalled();
+  });
   it.each([['success', true], ['reverted', false]] as const)('reconciles a %s receipt', async (status, confirmed) => {
     const receipt = { status, blockNumber: 10n, gasUsed: 2n, effectiveGasPrice: 3n };
     const test = setup([attempt('BROADCASTING', { copyTransactionHash: hash })], { getReceipt: vi.fn(async () => receipt) });

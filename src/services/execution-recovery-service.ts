@@ -32,6 +32,10 @@ export class ExecutionRecoveryService {
         .catch((error) => this.logger.warn({ attemptId: attempt.id, error }, 'Execution recovery attempt failed'));
     }
   }
+  async recoverAttemptById(id: string): Promise<void> {
+    const attempt = await this.attempts.findById(id);
+    if (attempt) await this.walletLock.withLock(attempt.externalChainId, attempt.destinationWallet, async () => this.recoverAttempt(attempt));
+  }
   private async recoverAttempt(attempt: ExecutionAttempt & { externalChainId: number }): Promise<void> {
     if (attempt.status === 'RETRY') return;
     if (attempt.status === 'CLAIMED' || attempt.status === 'SIMULATING') {
@@ -56,6 +60,7 @@ export class ExecutionRecoveryService {
       if (attempt.status !== 'SUBMITTED') await this.attempts.transition(attempt.id, 'SUBMITTED');
       return;
     }
+    if (attempt.status === 'SUBMITTED') return;
     const [latestNonce, pendingNonce] = await Promise.all([client.getLatestNonce(attempt.destinationWallet), client.getPendingNonce(attempt.destinationWallet)]);
     await this.markUnknown(attempt, `Transaction hash is not visible; ${this.nonceEvidence(attempt, latestNonce, pendingNonce)}`);
   }

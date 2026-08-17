@@ -1,4 +1,4 @@
-import { createPublicClient, http, webSocket, type PublicClient } from 'viem';
+import { createPublicClient, fallback, http, webSocket, type PublicClient } from 'viem';
 import type { EvmChainConfig } from '../../config/chains.js';
 import { ConfigurationError } from '../../utils/errors.js';
 
@@ -25,7 +25,8 @@ export class EvmChainManager {
     const existing = this.httpClients.get(chainId);
     if (existing) return existing;
     const config = this.getChain(chainId);
-    const client = createPublicClient({ chain: config.viemChain, transport: http(config.rpcUrl) });
+    const transports = config.rpcUrls.map((url) => http(url, { retryCount: 2, retryDelay: 250 }));
+    const client = createPublicClient({ chain: config.viemChain, transport: transports.length === 1 ? transports[0]! : fallback(transports, { rank: true }) });
     this.httpClients.set(chainId, client);
     return client;
   }
@@ -35,7 +36,8 @@ export class EvmChainManager {
     if (existing) return existing;
     const config = this.getChain(chainId);
     if (!config.websocketRpcUrl) throw new ConfigurationError(`Chain ${chainId} has no WebSocket RPC URL`);
-    const client = createPublicClient({ chain: config.viemChain, transport: webSocket(config.websocketRpcUrl) });
+    const transports = config.websocketRpcUrls.map((url) => webSocket(url, { reconnect: { attempts: 10, delay: 1_000 } }));
+    const client = createPublicClient({ chain: config.viemChain, transport: transports.length === 1 ? transports[0]! : fallback(transports) });
     this.websocketClients.set(chainId, client);
     return client;
   }

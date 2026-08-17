@@ -5,7 +5,7 @@ import { DisabledChainError, DuplicateMonitoringError, InvalidWalletAddressError
 import type { ProposalApprovalService } from '../services/proposal-approval-service.js';
 import { ProposalAlreadyProcessedError, ProposalExpiredError, ProposalNotFoundError, ProposalNotReadyError, ProposalUnauthorizedError } from '../services/proposal-approval-service.js';
 
-interface WatchSession { step?: 'watch_address'; selectedChainId?: string; }
+interface WatchSession { step?: 'watch_address' | 'setting_destination' | 'setting_chains' | 'setting_contracts' | 'setting_native' | 'setting_gas' | 'setting_quantity'; selectedChainId?: string; }
 export type BotContext = Context & { session: WatchSession };
 type ChainSummary = { id: number; name: string };
 type ExecutionSettingsPort = { get(userId: string): Promise<UserExecutionSettings>; update(userId: string, input: Partial<UserExecutionSettings>): Promise<UserExecutionSettings> };
@@ -123,10 +123,39 @@ export function registerTelegramCommands(bot: Telegraf<BotContext>, service: Mon
   });
   bot.action(callbacks.status, async (ctx) => { await ctx.answerCbQuery(); try { const user = await userFor(ctx, service); const [wallets, chains, settings] = await Promise.all([service.status(user.id), service.configuredChainStatus(), options.executionSettings?.get(user.id)]); const activeWallets = wallets.filter((wallet) => wallet.enabled); await editOrReply(ctx, `Status\n\nBot status: Online\nMonitored wallets: ${activeWallets.length}\nConfigured chains: ${chains.length}\nExecution mode: ${settings?.executionMode ?? 'DISABLED'}\nDestination wallet: ${settings?.destinationWallet ? shortAddress(settings.destinationWallet) : 'Not configured'}\nMonitoring: ${activeWallets.length ? 'Active' : 'Inactive'}`, backMain()); } catch (error) { await ctx.reply(errorMessage(error)); } });
   bot.action(callbacks.activity, async (ctx) => { await ctx.answerCbQuery(); await editOrReply(ctx, 'Activity\n\nNo recent activity.', backMain()); });
-  bot.action(callbacks.settings, async (ctx) => { await ctx.answerCbQuery(); try { const user = await userFor(ctx, service); const value = await options.executionSettings?.get(user.id); await editOrReply(ctx, `Settings\n\nDestination wallet: ${value?.destinationWallet ? shortAddress(value.destinationWallet) : 'Not configured'}\nMax native cost: ${value?.maxNativeValue ?? 'Not configured'}\nMax gas cost: ${value?.maxGas ?? 'Not configured'}\nMax quantity: ${value?.maxQuantity ?? 'Not configured'}\nContract allowlist: ${value?.allowedContracts.length ? `${value.allowedContracts.length} configured` : 'Not configured'}\nChain allowlist: ${value?.allowedChains.length ? `${value.allowedChains.length} configured` : 'Not configured'}`, backMain()); } catch (error) { await ctx.reply(errorMessage(error)); } });
+  bot.action(callbacks.settings, async (ctx) => { await ctx.answerCbQuery(); try { const user = await userFor(ctx, service); const value = await options.executionSettings?.get(user.id); await editOrReply(ctx, `Settings\n\nDestination wallet: ${value?.destinationWallet ? shortAddress(value.destinationWallet) : 'Not configured'}\nMax native cost: ${value?.maxNativeValue ?? 'Not configured'}\nMax gas cost: ${value?.maxGas ?? 'Not configured'}\nMax quantity: ${value?.maxQuantity ?? 'Not configured'}\nContract allowlist: ${value?.allowedContracts.length ? `${value.allowedContracts.length} configured` : 'Not configured'}\nChain allowlist: ${value?.allowedChains.length ? `${value.allowedChains.length} configured` : 'Not configured'}\nAutomatic retry: ${value?.autoRetryEnabled ? 'Enabled' : 'Disabled'}`, Markup.inlineKeyboard([
+    [Markup.button.callback('Destination', 'settings:edit:destination'), Markup.button.callback('Chains', 'settings:edit:chains')],
+    [Markup.button.callback('Contracts', 'settings:edit:contracts'), Markup.button.callback('Native limit', 'settings:edit:native')],
+    [Markup.button.callback('Gas limit', 'settings:edit:gas'), Markup.button.callback('Quantity', 'settings:edit:quantity')],
+    [Markup.button.callback('Toggle automatic retry', 'settings:retry')], [Markup.button.callback('← Back', callbacks.main)], [Markup.button.callback('🏠 Main Menu', callbacks.main)],
+  ])); } catch (error) { await ctx.reply(errorMessage(error)); } });
+
+  const settingPrompts = {
+    destination: ['setting_destination', 'Send the public destination wallet address, or "clear".'], chains: ['setting_chains', 'Send comma-separated chain IDs, or "clear".'],
+    contracts: ['setting_contracts', 'Send comma-separated contract addresses, or "clear".'], native: ['setting_native', 'Send the maximum native value in wei, or "clear".'],
+    gas: ['setting_gas', 'Send the maximum gas units, or "clear".'], quantity: ['setting_quantity', 'Send the maximum mint quantity, or "clear".'],
+  } as const;
+  bot.action(/^settings:edit:(destination|chains|contracts|native|gas|quantity)$/, async (ctx) => {
+    await ctx.answerCbQuery(); const selected = settingPrompts[ctx.match[1] as keyof typeof settingPrompts]; ctx.session = { step: selected[0] }; await editOrReply(ctx, selected[1], cancelMenu());
+  });
+  bot.action('settings:retry', async (ctx) => { await ctx.answerCbQuery(); if (!options.executionSettings) return; const user = await userFor(ctx, service); const current = await options.executionSettings.get(user.id); await options.executionSettings.update(user.id, { autoRetryEnabled: !current.autoRetryEnabled }); await showMain(ctx); });
 
   bot.on('text', async (ctx) => {
     if (ctx.message.text.startsWith('/')) return void ctx.reply('Unknown command. Use /help or the menu below.', mainMenu());
+    if (ctx.session?.step?.startsWith('setting_')) {
+      if (!options.executionSettings) return void ctx.reply('Execution settings are unavailable.', mainMenu());
+      const user = await userFor(ctx, service); const text = ctx.message.text.trim(); const clear = text.toLowerCase() === 'clear';
+      try {
+        const update = ctx.session.step === 'setting_destination' ? { destinationWallet: clear ? null : text }
+          : ctx.session.step === 'setting_chains' ? { allowedChains: clear ? [] : text.split(',').map((value) => value.trim()).filter(Boolean) }
+            : ctx.session.step === 'setting_contracts' ? { allowedContracts: clear ? [] : text.split(',').map((value) => value.trim()).filter(Boolean) }
+              : ctx.session.step === 'setting_native' ? { maxNativeValue: clear ? null : text }
+                : ctx.session.step === 'setting_gas' ? { maxGas: clear ? null : text }
+                  : { maxQuantity: clear ? null : text };
+        await options.executionSettings.update(user.id, update); ctx.session = {}; await ctx.reply('Execution settings updated.', mainMenu());
+      } catch (error) { await ctx.reply(errorMessage(error), cancelMenu()); }
+      return;
+    }
     if (ctx.session?.step !== 'watch_address' || !ctx.session.selectedChainId) return void ctx.reply('Use the menu to choose an action.', mainMenu());
     const address = ctx.message.text.trim();
     try { service.validateWalletAddress(address); } catch (error) { return void ctx.reply(errorMessage(error), cancelMenu()); }

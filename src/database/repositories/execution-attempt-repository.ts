@@ -56,12 +56,18 @@ export class ExecutionAttemptRepository {
     values.push(fromStates);
     const result = await this.db.query(`UPDATE execution_attempts SET ${assignments.join(', ')} WHERE id=$1 AND status = ANY($${values.length}::text[]) RETURNING *`, values);
     if (!result.rows[0]) throw new Error(`Invalid or concurrent execution-attempt transition to ${status}`);
+    const proposalStatus = status === 'SUBMITTED' ? 'SUBMITTED' : status === 'CONFIRMED' ? 'CONFIRMED' : ['REVERTED', 'FAILED', 'SKIPPED'].includes(status) ? 'FAILED' : null;
+    if (proposalStatus) await this.db.query(`UPDATE copy_transaction_proposals SET execution_status=$2, updated_at=CURRENT_TIMESTAMP WHERE id=$1
+      AND execution_status NOT IN ('CONFIRMED','REJECTED','EXPIRED')`, [result.rows[0].proposal_id, proposalStatus]);
     return map(result.rows[0]);
   }
   async reconcile(hash: string, input: { confirmed: boolean; blockNumber: bigint; gasUsed: bigint; effectiveGasPrice: bigint }): Promise<void> {
     await this.db.query(`UPDATE execution_attempts SET status=$2, block_number=$3, gas_used=$4, effective_gas_price=$5,
       confirmed_at=CURRENT_TIMESTAMP, failed_at=CASE WHEN $2='REVERTED' THEN CURRENT_TIMESTAMP ELSE failed_at END, updated_at=CURRENT_TIMESTAMP
       WHERE copy_transaction_hash=$1 AND status IN ('SUBMITTED','PENDING','BROADCASTING','UNKNOWN')`, [hash.toLowerCase(), input.confirmed ? 'CONFIRMED' : 'REVERTED', input.blockNumber.toString(), input.gasUsed.toString(), input.effectiveGasPrice.toString()]);
+    await this.db.query(`UPDATE copy_transaction_proposals SET execution_status=$2, updated_at=CURRENT_TIMESTAMP
+      WHERE id IN (SELECT proposal_id FROM execution_attempts WHERE copy_transaction_hash=$1) AND execution_status NOT IN ('REJECTED','EXPIRED')`,
+    [hash.toLowerCase(), input.confirmed ? 'CONFIRMED' : 'FAILED']);
   }
   async listAwaitingConfirmation(): Promise<Array<{ transactionHash: string; externalChainId: number }>> {
     const result = await this.db.query(`SELECT ea.copy_transaction_hash, c.chain_id FROM execution_attempts ea
@@ -71,6 +77,15 @@ export class ExecutionAttemptRepository {
   async listRecoveryCandidates(): Promise<Array<ExecutionAttempt & { externalChainId: number }>> {
     const result = await this.db.query(`SELECT ea.*, c.chain_id AS external_chain_id FROM execution_attempts ea
       JOIN chains c ON c.id=ea.chain_id WHERE ea.status IN ('CLAIMED','SIMULATING','SIGNING','SIGNED','BROADCASTING','UNKNOWN','RETRY') ORDER BY ea.updated_at, ea.id`);
+    return result.rows.map((row) => ({ ...map(row), externalChainId: Number(row.external_chain_id) }));
+  }
+  async findById(id: string): Promise<(ExecutionAttempt & { externalChainId: number }) | null> {
+    const result = await this.db.query(`SELECT ea.*, c.chain_id AS external_chain_id FROM execution_attempts ea JOIN chains c ON c.id=ea.chain_id WHERE ea.id=$1`, [id]);
+    return result.rows[0] ? { ...map(result.rows[0]), externalChainId: Number(result.rows[0].external_chain_id) } : null;
+  }
+  async listWorkItems(): Promise<Array<ExecutionAttempt & { externalChainId: number }>> {
+    const result = await this.db.query(`SELECT ea.*, c.chain_id AS external_chain_id FROM execution_attempts ea JOIN chains c ON c.id=ea.chain_id
+      WHERE ea.status IN ('RETRY','SIGNING','SIGNED','BROADCASTING','UNKNOWN','SUBMITTED') ORDER BY ea.updated_at, ea.id`);
     return result.rows.map((row) => ({ ...map(row), externalChainId: Number(row.external_chain_id) }));
   }
 }

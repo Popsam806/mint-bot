@@ -1,4 +1,5 @@
 import { ApplicationRuntime } from './application/runtime.js';
+import { OperationalHealthService } from './application/operational-health.js';
 import { createTelegramBot, registerTelegramCommands } from './bot/telegram.js';
 import { EvmChainManager } from './blockchain/clients/evm-chain-manager.js';
 import { ViemExecutionClient } from './blockchain/clients/execution-client.js';
@@ -20,6 +21,7 @@ import { MonitoringCheckpointRepository } from './database/repositories/monitori
 import { UserExecutionSettingsRepository } from './database/repositories/user-execution-settings-repository.js';
 import { UserRepository } from './database/repositories/user-repository.js';
 import { createRedisConnection } from './queue/redis.js';
+import { BackgroundWorkerService } from './queue/background-workers.js';
 import { CompositePendingAnalysisHook } from './services/composite-pending-analysis-hook.js';
 import { PostgresDestinationWalletLock } from './services/destination-wallet-lock.js';
 import { ExecutionSettingsService } from './services/execution-settings-service.js';
@@ -30,7 +32,8 @@ import { PendingAutomaticExecutionService } from './services/pending-automatic-e
 import { PendingCalldataClassifier } from './services/pending-calldata-classifier.js';
 import { ProposalApprovalService } from './services/proposal-approval-service.js';
 import { createConfiguredSigner } from './services/signer-factory.js';
-import { AutomaticTransactionExecutor } from './services/transaction-executor.js';
+import { SourceTransactionReconciliationService } from './services/source-transaction-reconciliation-service.js';
+import { AutomaticTransactionExecutor, UnconfiguredTransactionExecutor, type TransactionExecutor } from './services/transaction-executor.js';
 import { serializeError } from './utils/errors.js';
 import { createLogger } from './utils/logger.js';
 
@@ -49,28 +52,38 @@ const recoveryService = new ExecutionRecoveryService(executionAttempts, (externa
   undefined, new PostgresDestinationWalletLock(postgres));
 const mintDetector = new NftMintDetector(detectedTransactions, new DetectedMintRepository(postgres), logger);
 const monitoringEngine = new MonitoringEngine(chainManager, monitoredAddresses, detectedTransactions, new MonitoringCheckpointRepository(postgres), logger, mintDetector);
+const confirmationEngine = new CopyTransactionConfirmationEngine(chainManager, executionAttempts, logger);
 
 const hooks: PendingAnalysisHook[] = [new PendingCalldataClassifier(detectedTransactions, logger)];
 const configuredSigner = createConfiguredSigner(env);
 const automaticExecutionEnabled = configuredSigner.enabled;
+const settings = new UserExecutionSettingsRepository(postgres);
+const proposals = new CopyTransactionProposalRepository(postgres);
+const contexts = new AutomaticExecutionContextRepository(postgres);
+const chainCache = new Map<string, number>();
+let executor: TransactionExecutor = new UnconfiguredTransactionExecutor();
 if (configuredSigner.enabled) {
   const signer = configuredSigner.signer;
-  const settings = new UserExecutionSettingsRepository(postgres);
-  const proposals = new CopyTransactionProposalRepository(postgres);
-  const contexts = new AutomaticExecutionContextRepository(postgres);
-  const chainCache = new Map<string, number>();
-  const executor = new AutomaticTransactionExecutor(proposals, settings, contexts, executionAttempts, signer, (databaseChainId) => {
+  executor = new AutomaticTransactionExecutor(proposals, settings, contexts, executionAttempts, signer, (databaseChainId) => {
     const externalChainId = chainCache.get(databaseChainId);
     if (externalChainId === undefined) throw new Error(`No configured EVM chain for database chain ${databaseChainId}`);
     return { chainId: externalChainId, client: new ViemExecutionClient(chainManager.getPublicClient(externalChainId)) };
   }, undefined, undefined, new PostgresDestinationWalletLock(postgres));
-  hooks.push(new PendingAutomaticExecutionService(settings, proposals, (chain) => new ViemExecutionClient(chainManager.getPublicClient(chain.id)), executor, logger,
-    (databaseChainId, externalChainId) => chainCache.set(databaseChainId, externalChainId), () => recoveryService.isReady()));
   logger.info({ signerProvider: configuredSigner.provider }, 'Automatic execution signer configured');
 }
+const backgroundWorkers = new BackgroundWorkerService(redis, executionAttempts, proposals, executor, recoveryService, confirmationEngine, logger, 2,
+  (databaseChainId, externalChainId) => chainCache.set(databaseChainId, externalChainId));
+if (configuredSigner.enabled) hooks.push(new PendingAutomaticExecutionService(settings, proposals, (chain) => new ViemExecutionClient(chainManager.getPublicClient(chain.id)), executor, logger,
+  (databaseChainId, externalChainId) => chainCache.set(databaseChainId, externalChainId), () => backgroundWorkers.isReady(), backgroundWorkers));
+const health = new OperationalHealthService(env.HEALTH_PORT, [
+  { name: 'postgresql', check: async () => { await postgres.query('SELECT 1'); } },
+  { name: 'redis-workers', check: async () => { await redis.ping(); if (!backgroundWorkers.isReady()) throw new Error('workers unavailable'); } },
+  ...chainManager.getConfiguredChains().map((chain) => ({ name: `rpc-${chain.id}`, check: async () => { await chainManager.getPublicClient(chain.id).getBlockNumber(); } })),
+], logger);
+const sourceReconciliation = new SourceTransactionReconciliationService(detectedTransactions,
+  (chainId) => new ViemExecutionClient(chainManager.getPublicClient(chainId)), logger);
 
 const pendingMonitoringEngine = new PendingMonitoringEngine(chainManager, monitoredAddresses, detectedTransactions, logger, undefined, new CompositePendingAnalysisHook(hooks));
-const confirmationEngine = new CopyTransactionConfirmationEngine(chainManager, executionAttempts, logger);
 const monitoringService = new MonitoringService(users, chains, monitoredAddresses, () => chainManager.getConfiguredChains(), async () => {
   await Promise.all([monitoringEngine.refreshNow(), pendingMonitoringEngine.refreshNow()]);
 });
@@ -91,7 +104,9 @@ const runtime = new ApplicationRuntime({
   monitoring: monitoringEngine,
   pendingMonitoring: pendingMonitoringEngine,
   confirmation: confirmationEngine,
-  recovery: recoveryService,
+  backgroundWorkers,
+  health,
+  sourceReconciliation,
   telegram,
   automaticExecutionEnabled,
   automaticExecutionProvider: configuredSigner.provider,

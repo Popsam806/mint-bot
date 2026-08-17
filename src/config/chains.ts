@@ -26,19 +26,16 @@ const websocketRpcUrlSchema = z.string().url().refine((url) => url.startsWith('w
 
 export type EvmChainConfig = Omit<z.infer<typeof chainFileEntrySchema>, 'rpcUrlEnv' | 'websocketRpcUrlEnv'> & {
   rpcUrl: string;
+  rpcUrls: string[];
   websocketRpcUrl?: string;
+  websocketRpcUrls: string[];
   viemChain: Chain;
 };
 
-function resolveRpcUrl(environment: NodeJS.ProcessEnv, variableName: string, schema: z.ZodType<string>): string {
-  const value = environment[variableName];
-  const result = schema.safeParse(value);
-
-  if (!result.success) {
-    throw new ConfigurationError(`Environment variable ${variableName} must contain a valid RPC URL`);
-  }
-
-  return result.data;
+function resolveRpcUrls(environment: NodeJS.ProcessEnv, variableName: string, schema: z.ZodType<string>): string[] {
+  const values = (environment[variableName] ?? '').split(',').map((value) => value.trim()).filter(Boolean);
+  if (!values.length || values.some((value) => !schema.safeParse(value).success)) throw new ConfigurationError(`Environment variable ${variableName} must contain valid comma-separated RPC URLs`);
+  return [...new Set(values)];
 }
 
 export function loadChainConfigs(configPath: string, environment: NodeJS.ProcessEnv = process.env): EvmChainConfig[] {
@@ -52,20 +49,21 @@ export function loadChainConfigs(configPath: string, environment: NodeJS.Process
       if (ids.has(chain.id)) throw new ConfigurationError(`Duplicate chain ID: ${chain.id}`);
       ids.add(chain.id);
       const { rpcUrlEnv, websocketRpcUrlEnv, ...metadata } = chain;
-      const rpcUrl = resolveRpcUrl(environment, rpcUrlEnv, httpRpcUrlSchema);
-      const websocketRpcUrl = websocketRpcUrlEnv
-        ? resolveRpcUrl(environment, websocketRpcUrlEnv, websocketRpcUrlSchema)
-        : undefined;
+      const rpcUrls = resolveRpcUrls(environment, rpcUrlEnv, httpRpcUrlSchema); const rpcUrl = rpcUrls[0]!;
+      const websocketRpcUrls = websocketRpcUrlEnv ? resolveRpcUrls(environment, websocketRpcUrlEnv, websocketRpcUrlSchema) : [];
+      const websocketRpcUrl = websocketRpcUrls[0];
 
       return {
         ...metadata,
         rpcUrl,
+        rpcUrls,
         websocketRpcUrl,
+        websocketRpcUrls,
         viemChain: defineChain({
           id: chain.id,
           name: chain.name,
           nativeCurrency: chain.nativeCurrency,
-          rpcUrls: { default: { http: [rpcUrl], webSocket: websocketRpcUrl ? [websocketRpcUrl] : undefined } },
+          rpcUrls: { default: { http: rpcUrls, webSocket: websocketRpcUrls.length ? websocketRpcUrls : undefined } },
           blockExplorers: { default: { name: `${chain.name} Explorer`, url: chain.blockExplorerUrl } },
         }),
       };

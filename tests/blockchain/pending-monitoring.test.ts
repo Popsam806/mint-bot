@@ -50,6 +50,25 @@ class FakeProvider implements PendingTransactionProvider {
 }
 
 describe('PendingMonitoringEngine', () => {
+  it('reconnects a failed pending WebSocket while polling remains available', async () => {
+    let disconnect: ((error: unknown) => void) | undefined; const subscribe = vi.fn(async (_handler, onError) => { disconnect = onError; return vi.fn(); });
+    const provider = { detectCapability: async () => 'websocket' as const, subscribe, poll: vi.fn(async () => []), getTransaction: vi.fn(async () => null) };
+    const config = { id: 1, name: 'Chain 1', pendingTransactionMode: 'websocket' }; const repository = { upsertPending: vi.fn(), markDroppedBefore: vi.fn(async () => 0) };
+    const engine = new PendingMonitoringEngine({ getConfiguredChains: () => [config] } as never, { listEnabledByChain: async () => [{ id: '1', userId: '1', chainId: '1', walletAddress: walletA, enabled: true, createdAt: new Date(), updatedAt: new Date(), externalChainId: '1' }] } as never,
+      repository as never, { info: vi.fn(), warn: vi.fn() } as never, () => provider, undefined, { reconnectDelayMs: 1, pollingIntervalMs: 1, dropTimeoutMs: 100_000 });
+    await engine.start(); disconnect?.(new Error('closed')); await new Promise((resolve) => setTimeout(resolve, 10)); await engine.stop(); expect(subscribe.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('bounds the pending hash cache and can reconsider evicted observations', async () => {
+    const hashes = ['a', 'b', 'c'].map((value) => `0x${value.repeat(64)}`); let emit: ((value: PendingObservation) => void) | undefined;
+    const provider = { detectCapability: async () => 'websocket' as const, subscribe: async (handler: (value: PendingObservation) => void) => { emit = handler; return vi.fn(); }, poll: async () => [], getTransaction: async (hash: string) => tx(hash) };
+    const repository = { upsertPending: vi.fn(async ({ transaction }) => ({ ...transaction, transactionHash: transaction.hash, inputData: transaction.input, ingestedAt: new Date() })), markDroppedBefore: vi.fn(async () => 0) };
+    const config = { id: 1, name: 'Chain 1', pendingTransactionMode: 'websocket' };
+    const engine = new PendingMonitoringEngine({ getConfiguredChains: () => [config] } as never, { listEnabledByChain: async () => [{ id: '1', userId: '1', chainId: '1', walletAddress: walletA, enabled: true, createdAt: new Date(), updatedAt: new Date(), externalChainId: '1' }] } as never,
+      repository as never, { info: vi.fn(), warn: vi.fn() } as never, () => provider, undefined, { maxSeenHashes: 2, dropTimeoutMs: 100_000 });
+    await engine.start(); for (const hash of hashes) emit?.({ hash, observedAt: new Date(), provider: 'test' }); emit?.({ hash: hashes[0]!, observedAt: new Date(), provider: 'test' }); await new Promise((resolve) => setTimeout(resolve, 10)); await engine.stop();
+    expect(repository.upsertPending).toHaveBeenCalledTimes(4);
+  });
   it('filters senders, deduplicates hashes, and handles multiple wallets/chains', async () => {
     const hashA = '0x' + 'a'.repeat(64); const hashB = '0x' + 'b'.repeat(64); const hashIgnored = '0x' + 'c'.repeat(64);
     const providers = new Map<number, FakeProvider>([

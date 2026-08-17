@@ -15,6 +15,9 @@ export class ViemBlockProvider implements ChainBlockProvider {
       })),
     };
   }
+  async getTransactionReceiptStatus(transactionHash: string): Promise<'success' | 'reverted'> {
+    return (await this.httpClient.getTransactionReceipt({ hash: transactionHash as `0x${string}` })).status;
+  }
   watchBlockNumbers(onBlock: (blockNumber: bigint) => void, onError: (error: unknown) => void): () => void {
     if (!this.websocketClient) throw new Error('WebSocket provider is unavailable');
     return this.websocketClient.watchBlockNumber({ emitOnBegin: true, onBlockNumber: onBlock, onError });

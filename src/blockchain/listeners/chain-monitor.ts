@@ -93,8 +93,12 @@ export class ChainMonitor {
   private async processBlock(block: MinedBlock): Promise<void> {
     const byAddress = new Map(this.options.getAddresses().filter((item) => item.enabled).map((item) => [item.walletAddress.toLowerCase(), item]));
     for (const transaction of block.transactions) {
-      if (typeof this.options.transactions.markMined === 'function') await this.options.transactions.markMined(transaction.hash, block.number);
       const monitored = byAddress.get(transaction.from.toLowerCase());
+      if (typeof this.options.transactions.markMined === 'function') {
+        const receiptStatus = monitored && this.options.provider.getTransactionReceiptStatus ? await this.options.provider.getTransactionReceiptStatus(transaction.hash) : 'success';
+        await this.options.transactions.markMined(transaction.hash, block.number, receiptStatus === 'reverted');
+        if (receiptStatus === 'reverted') { this.options.logger.warn({ chainId: this.options.externalChainId, transactionHash: transaction.hash }, 'Monitored source transaction reverted'); continue; }
+      }
       if (!monitored) continue;
       const saved = await this.options.transactions.createIfAbsent({
         monitoredAddressId: monitored.id, chainId: this.options.databaseChainId, transactionHash: transaction.hash,

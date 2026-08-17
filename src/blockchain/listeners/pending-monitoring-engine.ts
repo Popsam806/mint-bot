@@ -7,13 +7,14 @@ import type { EvmChainConfig } from '../../config/chains.js';
 import { ViemPendingTransactionProvider } from './viem-pending-provider.js';
 
 export interface PendingAnalysisHook { onPending(transaction: unknown, monitored: MonitoredAddress, chain?: EvmChainConfig): Promise<void>; }
-export interface PendingMonitoringOptions { pollingIntervalMs?: number; dropTimeoutMs?: number; refreshIntervalMs?: number; }
+export interface PendingMonitoringOptions { pollingIntervalMs?: number; dropTimeoutMs?: number; refreshIntervalMs?: number; reconnectDelayMs?: number; maxSeenHashes?: number; }
 
 class ChainPendingMonitor {
   private stopSubscription?: () => void;
   private pollTimer?: ReturnType<typeof setTimeout>;
   private dropTimer?: ReturnType<typeof setTimeout>;
-  private readonly seen = new Set<string>();
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
+  private readonly seen = new Map<string, Date>();
   private readonly active = new Map<string, Date>();
   private running = false;
   constructor(private readonly config: EvmChainConfig, private readonly databaseChainId: string, private readonly provider: PendingTransactionProvider, private readonly addresses: () => readonly MonitoredAddress[], private readonly repository: DetectedTransactionRepository, private readonly hook: PendingAnalysisHook | undefined, private readonly logger: Logger, private readonly options: PendingMonitoringOptions) {}
@@ -23,14 +24,23 @@ class ChainPendingMonitor {
     const capability = await this.provider.detectCapability();
     this.logger.info({ chainId: this.config.id, pendingCapability: capability }, 'Pending chain monitor starting');
     if (capability === 'websocket') {
-      try { this.stopSubscription = await this.provider.subscribe((observation) => void this.handle(observation), (error) => this.handleDisconnect(error)); }
+      try { await this.startSubscription(); }
       catch (error) { this.logger.warn({ chainId: this.config.id, error }, 'Pending subscription unavailable; falling back'); this.startPolling(); }
     } else if (capability === 'filter' || capability === 'polling') this.startPolling();
     else this.logger.warn({ chainId: this.config.id }, 'Pending transaction monitoring unsupported by provider');
     this.startDropReconciliation();
   }
-  async stop(): Promise<void> { this.running = false; this.stopSubscription?.(); if (this.pollTimer) clearTimeout(this.pollTimer); if (this.dropTimer) clearTimeout(this.dropTimer); }
-  private handleDisconnect(error: unknown): void { if (!this.running) return; this.logger.warn({ chainId: this.config.id, error }, 'Pending subscription disconnected'); this.stopSubscription?.(); this.startPolling(); }
+  async stop(): Promise<void> { this.running = false; this.stopSubscription?.(); if (this.pollTimer) clearTimeout(this.pollTimer); if (this.dropTimer) clearTimeout(this.dropTimer); if (this.reconnectTimer) clearTimeout(this.reconnectTimer); }
+  private async startSubscription(): Promise<void> {
+    this.stopSubscription = await this.provider.subscribe((observation) => void this.handle(observation), (error) => this.handleDisconnect(error));
+    if (this.pollTimer) { clearTimeout(this.pollTimer); this.pollTimer = undefined; }
+    this.logger.info({ chainId: this.config.id }, 'Pending WebSocket subscription ready');
+  }
+  private handleDisconnect(error: unknown): void {
+    if (!this.running) return;
+    this.logger.warn({ chainId: this.config.id, error }, 'Pending subscription disconnected'); this.stopSubscription?.(); this.stopSubscription = undefined; this.startPolling();
+    if (!this.reconnectTimer) this.reconnectTimer = setTimeout(() => { this.reconnectTimer = undefined; void this.startSubscription().catch((reconnectError) => this.handleDisconnect(reconnectError)); }, this.options.reconnectDelayMs ?? 5_000);
+  }
   private startPolling(): void {
     if (this.pollTimer || !this.running) return;
     const poll = async () => { if (!this.running) return; try { for (const observation of await this.provider.poll()) await this.handle(observation); } catch (error) { this.logger.warn({ chainId: this.config.id, error }, 'Pending polling failed'); } finally { if (this.running) this.pollTimer = setTimeout(poll, this.options.pollingIntervalMs ?? 500); else this.pollTimer = undefined; } };
@@ -42,8 +52,8 @@ class ChainPendingMonitor {
   }
   private async handle(observation: PendingObservation): Promise<void> {
     const hash = observation.hash.toLowerCase();
-    if (this.seen.has(hash)) { this.active.set(hash, observation.observedAt); return; }
-    this.seen.add(hash);
+    if (this.seen.has(hash)) { this.seen.set(hash, observation.observedAt); this.active.set(hash, observation.observedAt); return; }
+    this.seen.set(hash, observation.observedAt); this.pruneCaches();
     const transaction = await this.provider.getTransaction(observation.hash);
     if (!transaction) return;
     const monitored = this.addresses().find((address) => address.enabled && address.walletAddress.toLowerCase() === transaction.from.toLowerCase());
@@ -52,6 +62,12 @@ class ChainPendingMonitor {
     const saved = await this.repository.upsertPending({ monitoredAddressId: monitored.id, chainId: this.databaseChainId, transaction, observation });
     this.logger.info({ chainId: this.config.id, transactionHash: saved.transactionHash, observedAt: observation.observedAt.toISOString(), ingestedAt: saved.ingestedAt.toISOString() }, 'Pending monitored transaction detected');
     if (this.hook) await this.hook.onPending(saved, monitored, this.config);
+  }
+  private pruneCaches(): void {
+    const maximum = this.options.maxSeenHashes ?? 10_000;
+    while (this.seen.size > maximum) { const oldest = this.seen.keys().next().value as string | undefined; if (!oldest) break; this.seen.delete(oldest); this.active.delete(oldest); }
+    const cutoff = Date.now() - (this.options.dropTimeoutMs ?? 120_000) * 2;
+    for (const [hash, seenAt] of this.active) if (seenAt.getTime() < cutoff) this.active.delete(hash);
   }
 }
 

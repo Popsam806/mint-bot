@@ -33,12 +33,17 @@ describe('chain configuration', () => {
     });
   });
 
+  it('supports ordered comma-separated RPC failover endpoints', () => {
+    const chains = loadChainConfigs(configPath, { ...rpcEnvironment, ETHEREUM_RPC_URL: 'https://primary.test, https://backup.test' });
+    expect(chains[0]?.rpcUrls).toEqual(['https://primary.test', 'https://backup.test']);
+  });
+
   it('fails when a configured RPC environment variable is missing', () => {
     const incompleteEnvironment: NodeJS.ProcessEnv = { ...rpcEnvironment };
     delete incompleteEnvironment.BASE_WS_RPC_URL;
 
     expect(() => loadChainConfigs(configPath, incompleteEnvironment)).toThrowError(
-      new ConfigurationError('Environment variable BASE_WS_RPC_URL must contain a valid RPC URL'),
+      new ConfigurationError('Environment variable BASE_WS_RPC_URL must contain valid comma-separated RPC URLs'),
     );
   });
 });

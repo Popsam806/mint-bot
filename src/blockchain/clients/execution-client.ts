@@ -5,6 +5,7 @@ export interface ExecutionClient {
   simulate(request: ProposalRequest): Promise<{ success: true } | { success: false; error: string }>;
   estimateGas(request: ProposalRequest): Promise<bigint>;
   getPendingNonce(address: string): Promise<number>;
+  getBalance(address: string): Promise<bigint>;
   getLatestNonce(address: string): Promise<number>;
   getTransaction(transactionHash: string): Promise<{ blockNumber: bigint | null } | null>;
   getReceipt(transactionHash: string): Promise<{ status: 'success' | 'reverted'; blockNumber: bigint; gasUsed: bigint; effectiveGasPrice: bigint } | null>;
@@ -20,6 +21,7 @@ export class ViemExecutionClient implements ExecutionClient {
   }
   estimateGas(request: ProposalRequest): Promise<bigint> { return this.client.estimateGas({ account: request.from as `0x${string}`, to: request.to as `0x${string}`, data: request.data, value: request.value }); }
   getPendingNonce(address: string): Promise<number> { return this.client.getTransactionCount({ address: address as `0x${string}`, blockTag: 'pending' }); }
+  getBalance(address: string): Promise<bigint> { return this.client.getBalance({ address: address as `0x${string}`, blockTag: 'pending' }); }
   getLatestNonce(address: string): Promise<number> { return this.client.getTransactionCount({ address: address as `0x${string}`, blockTag: 'latest' }); }
   async getTransaction(transactionHash: string): Promise<{ blockNumber: bigint | null } | null> {
     try { const transaction = await this.client.getTransaction({ hash: transactionHash as `0x${string}` }); return { blockNumber: transaction.blockNumber }; }

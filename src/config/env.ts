@@ -5,6 +5,7 @@ import { isAddress } from 'viem';
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  HEALTH_PORT: z.coerce.number().int().min(0).max(65535).default(3000),
   TELEGRAM_BOT_TOKEN: z.string().min(1).optional(),
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),

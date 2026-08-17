@@ -7,21 +7,22 @@ const component = (onStart?: () => void) => ({
   stop: vi.fn(async () => undefined),
 });
 
-function setup(options: { telegram?: 'success' | 'failure'; onPendingStart?: () => void; redisFailure?: boolean; recoveryFailure?: boolean } = {}) {
+function setup(options: { telegram?: 'success' | 'failure'; onPendingStart?: () => void; redisFailure?: boolean; recoveryFailure?: boolean; backgroundWorkers?: boolean } = {}) {
   const postgres = { query: vi.fn(async () => ({ rows: [{ '?column?': 1 }] })), end: vi.fn(async () => undefined) };
   const redis = { ping: options.redisFailure ? vi.fn(async () => { throw new Error('redis unavailable'); }) : vi.fn(async () => 'PONG'), quit: vi.fn(async () => 'OK') };
   const monitoring = component();
   const pendingMonitoring = component(options.onPendingStart);
   const confirmation = component();
   const recovery = component();
+  const backgroundWorkers = options.backgroundWorkers ? component() : undefined;
   if (options.recoveryFailure) recovery.start.mockRejectedValueOnce(new Error('recovery unavailable'));
   const telegram = options.telegram ? {
     launch: options.telegram === 'failure' ? vi.fn(async () => { throw new Error('telegram unavailable'); }) : vi.fn(async () => undefined),
     stop: vi.fn(async () => undefined),
   } : undefined;
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const runtime = new ApplicationRuntime({ postgres, redis, monitoring, pendingMonitoring, confirmation, recovery, telegram, automaticExecutionEnabled: true, logger });
-  return { runtime, postgres, redis, monitoring, pendingMonitoring, confirmation, recovery, telegram, logger };
+  const runtime = new ApplicationRuntime({ postgres, redis, monitoring, pendingMonitoring, confirmation, recovery, backgroundWorkers, telegram, automaticExecutionEnabled: true, logger });
+  return { runtime, postgres, redis, monitoring, pendingMonitoring, confirmation, recovery, backgroundWorkers, telegram, logger };
 }
 
 describe('ApplicationRuntime', () => {
@@ -71,6 +72,12 @@ describe('ApplicationRuntime', () => {
     const test = setup({ redisFailure: true }); await test.runtime.start();
     expect(test.monitoring.start).toHaveBeenCalledOnce();
     expect(test.pendingMonitoring.start).toHaveBeenCalledOnce();
+  });
+
+  it('keeps monitoring active and does not start queue workers while Redis is unavailable', async () => {
+    const test = setup({ redisFailure: true, backgroundWorkers: true }); await test.runtime.start();
+    expect(test.monitoring.start).toHaveBeenCalledOnce(); expect(test.pendingMonitoring.start).toHaveBeenCalledOnce();
+    expect(test.backgroundWorkers?.start).not.toHaveBeenCalled(); await test.runtime.shutdown('test');
   });
 
   it('starts pending monitoring even when confirmed monitoring fails', async () => {

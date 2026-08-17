@@ -20,6 +20,13 @@ export class CopyTransactionProposalRepository {
     const result = await this.db.query('SELECT * FROM copy_transaction_proposals WHERE id = $1', [id]);
     return result.rows[0] ? map(result.rows[0]) : null;
   }
+  async listReadyWithoutAttempt(): Promise<CopyTransactionProposal[]> {
+    const result = await this.db.query(`SELECT p.* FROM copy_transaction_proposals p JOIN user_execution_settings s ON s.user_id=p.user_id
+      WHERE p.execution_status='READY' AND p.proposal_status='READY' AND s.execution_mode='AUTO'
+      AND lower(s.destination_wallet)=lower(p.destination_wallet) AND (p.expires_at IS NULL OR p.expires_at>CURRENT_TIMESTAMP)
+      AND NOT EXISTS (SELECT 1 FROM execution_attempts ea WHERE ea.proposal_id=p.id) ORDER BY p.updated_at, p.id`);
+    return result.rows.map(map);
+  }
   async changeExecutionStatus(id: string, expected: CopyTransactionProposal['executionStatus'], next: CopyTransactionProposal['executionStatus']): Promise<CopyTransactionProposal | null> {
     const result = await this.db.query('UPDATE copy_transaction_proposals SET execution_status = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND execution_status = $2 RETURNING *', [id, expected, next]);
     return result.rows[0] ? map(result.rows[0]) : null;

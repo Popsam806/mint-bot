@@ -8,6 +8,17 @@ export class CopyTransactionConfirmationEngine {
   constructor(private readonly chains: EvmChainManager, private readonly attempts: ExecutionAttemptRepository, private readonly logger: Logger, private readonly intervalMs = 3_000) {}
   async start(): Promise<void> { if (this.running) return; this.running = true; await this.tick(); }
   stop(): void { this.running = false; if (this.timer) clearTimeout(this.timer); }
+  async reconcileHash(transactionHash: string, externalChainId: number): Promise<boolean> {
+    try {
+      const receipt = await this.chains.getPublicClient(externalChainId).getTransactionReceipt({ hash: transactionHash as `0x${string}` });
+      await this.attempts.reconcile(transactionHash, { confirmed: receipt.status === 'success', blockNumber: receipt.blockNumber,
+        gasUsed: receipt.gasUsed, effectiveGasPrice: receipt.effectiveGasPrice });
+      return true;
+    } catch (error) {
+      if (!/not found|could not be found/i.test(error instanceof Error ? error.message : String(error))) throw error;
+      return false;
+    }
+  }
   private async tick(): Promise<void> {
     if (!this.running) return;
     try {

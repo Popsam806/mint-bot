@@ -1,11 +1,11 @@
 import { Queue, type JobsOptions } from 'bullmq';
 import type Redis from 'ioredis';
 
-const defaultJobOptions: JobsOptions = {
-  attempts: 3,
+export const defaultJobOptions: JobsOptions = {
+  attempts: 4,
   backoff: { type: 'exponential', delay: 1_000 },
-  removeOnComplete: 1_000,
-  removeOnFail: 5_000,
+  removeOnComplete: true,
+  removeOnFail: true,
 };
 
 export function createQueue(name: string, connection: Redis): Queue {
