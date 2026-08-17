@@ -1,0 +1,15 @@
+DROP INDEX IF EXISTS detected_transactions_original_hash_idx;
+DROP INDEX IF EXISTS detected_transactions_lifecycle_idx;
+DROP INDEX IF EXISTS detected_transactions_sender_nonce_idx;
+ALTER TABLE detected_transactions DROP COLUMN IF EXISTS provider_observation;
+ALTER TABLE detected_transactions DROP COLUMN IF EXISTS mined_block_number;
+ALTER TABLE detected_transactions DROP COLUMN IF EXISTS analysis_completed_at;
+ALTER TABLE detected_transactions DROP COLUMN IF EXISTS analysis_started_at;
+ALTER TABLE detected_transactions DROP COLUMN IF EXISTS ingested_at;
+ALTER TABLE detected_transactions DROP COLUMN IF EXISTS observed_at;
+ALTER TABLE detected_transactions DROP COLUMN IF EXISTS last_seen_at;
+ALTER TABLE detected_transactions DROP COLUMN IF EXISTS first_seen_at;
+ALTER TABLE detected_transactions DROP COLUMN IF EXISTS replacement_transaction_id;
+ALTER TABLE detected_transactions DROP COLUMN IF EXISTS original_transaction_hash;
+ALTER TABLE detected_transactions DROP COLUMN IF EXISTS nonce;
+ALTER TABLE detected_transactions ALTER COLUMN block_number SET NOT NULL;

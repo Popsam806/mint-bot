@@ -1,0 +1,43 @@
+{
+  "chains": [
+    {
+      "id": 1,
+      "name": "Ethereum",
+      "rpcUrlEnv": "ETHEREUM_RPC_URL",
+      "websocketRpcUrlEnv": "ETHEREUM_WS_RPC_URL",
+      "blockExplorerUrl": "https://etherscan.io",
+      "nativeCurrency": {
+        "name": "Ether",
+        "symbol": "ETH",
+        "decimals": 18
+      },
+      "pendingTransactionMode": "websocket"
+    },
+    {
+      "id": 8453,
+      "name": "Base",
+      "rpcUrlEnv": "BASE_RPC_URL",
+      "websocketRpcUrlEnv": "BASE_WS_RPC_URL",
+      "blockExplorerUrl": "https://basescan.org",
+      "nativeCurrency": {
+        "name": "Ether",
+        "symbol": "ETH",
+        "decimals": 18
+      },
+      "pendingTransactionMode": "websocket"
+    },
+    {
+      "id": 4663,
+      "name": "Robinhood Chain",
+      "rpcUrlEnv": "ROBINHOOD_RPC_URL",
+      "websocketRpcUrlEnv": "ROBINHOOD_WS_RPC_URL",
+      "blockExplorerUrl": "https://robinhoodchain.blockscout.com",
+      "nativeCurrency": {
+        "name": "Ether",
+        "symbol": "ETH",
+        "decimals": 18
+      },
+      "pendingTransactionMode": "websocket"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+ALTER TABLE detected_transactions DROP CONSTRAINT IF EXISTS detected_transactions_status_check;
+ALTER TABLE detected_transactions ALTER COLUMN block_number DROP NOT NULL;
+ALTER TABLE detected_transactions ADD CONSTRAINT detected_transactions_status_check CHECK (status IN ('PENDING','MINED','REPLACED','DROPPED','REVERTED','INVALIDATED','detected','confirmed','reorged'));
+ALTER TABLE detected_transactions ADD COLUMN nonce NUMERIC(78, 0);
+ALTER TABLE detected_transactions ADD COLUMN original_transaction_hash VARCHAR(66);
+ALTER TABLE detected_transactions ADD COLUMN replacement_transaction_id BIGINT REFERENCES detected_transactions(id) ON DELETE SET NULL;
+ALTER TABLE detected_transactions ADD COLUMN first_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE detected_transactions ADD COLUMN last_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE detected_transactions ADD COLUMN observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE detected_transactions ADD COLUMN ingested_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE detected_transactions ADD COLUMN analysis_started_at TIMESTAMPTZ;
+ALTER TABLE detected_transactions ADD COLUMN analysis_completed_at TIMESTAMPTZ;
+ALTER TABLE detected_transactions ADD COLUMN mined_block_number BIGINT;
+ALTER TABLE detected_transactions ADD COLUMN provider_observation TEXT;
+UPDATE detected_transactions SET original_transaction_hash = transaction_hash, first_seen_at = detected_at, last_seen_at = detected_at, observed_at = detected_at, ingested_at = detected_at, status = 'MINED', mined_block_number = block_number WHERE original_transaction_hash IS NULL;
+CREATE INDEX detected_transactions_sender_nonce_idx ON detected_transactions(chain_id, from_address, nonce);
+CREATE INDEX detected_transactions_lifecycle_idx ON detected_transactions(chain_id, status, last_seen_at);
+CREATE INDEX detected_transactions_original_hash_idx ON detected_transactions(original_transaction_hash);
